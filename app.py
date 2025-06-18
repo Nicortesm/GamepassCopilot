@@ -5,10 +5,13 @@ import json
 import re
 import openai
 
+# --- Configuración de la página ---
 st.set_page_config(layout="wide", page_title="Buscador Inteligente Game Pass")
 
+# --- Configuración de la App ---
 NOMBRE_BD = "gamepass_catalog.db"
 
+# --- Funciones de la App ---
 @st.cache_resource
 def get_db_connection():
     """Crea una conexión a la base de datos local que está en el repositorio."""
@@ -24,18 +27,26 @@ def get_db_connection():
         st.error(f"Error al conectar con la base de datos: {e}")
         return None
 
+# --- LÓGICA DE BÚSQUEDA HÍBRIDA ---
+
 def keyword_search(conn, search_term):
     """Búsqueda rápida y gratuita por palabras clave."""
     stop_words = set(['juego', 'juegos', 'de', 'un', 'una', 'con', 'para', 'que', 'sea', 'sean', 'y', 'o', 'el', 'la', 'los', 'las', 'algo', 'asi', 'llamado'])
     keywords = [word for word in re.split(r'[\\s,;]+', search_term.lower()) if word and word not in stop_words]
     if not keywords: return []
+    
+    # Construye la consulta SQL usando la columna 'search_keywords'
     query_parts = ["search_keywords LIKE ?"] * len(keywords)
     full_query = "SELECT * FROM games WHERE " + " AND ".join(query_parts) + " ORDER BY title"
     params = [f"%{kw}%" for kw in keywords]
+    
     try:
-        return conn.cursor().execute(full_query, tuple(params)).fetchall()
+        cursor = conn.cursor()
+        cursor.execute(full_query, tuple(params))
+        return cursor.fetchall()
     except sqlite3.Error as e:
-        st.error(f"Error en la búsqueda: {e}. Es posible que la base de datos no se haya generado correctamente.")
+        st.error(f"Error en la búsqueda por palabras clave: {e}")
+        st.info("Asegúrate de que la base de datos 'gamepass_catalog.db' contiene la columna 'search_keywords'.")
         return []
 
 @st.cache_data(show_spinner="🧠 Consultando al Asistente IA...")
@@ -43,14 +54,14 @@ def get_ai_recommendations(_conn, user_input):
     """Usa un modelo de IA avanzado para recomendaciones semánticas."""
     try:
         openai.api_key = st.secrets["openai"]["api_key"]
-    except:
-        st.error("Clave de API de OpenAI no configurada en los Secrets de Streamlit.")
+    except Exception:
+        st.error("Clave de API de OpenAI no configurada. Añádela a los 'Secrets' de tu app en Streamlit.")
         return []
-    
-    # MEJORA 1: Darle a la IA el título Y los géneros para más contexto.
+
+    # Le damos a la IA el título Y los géneros para más contexto.
     all_games_context = _conn.execute("SELECT title, genres FROM games WHERE genres IS NOT NULL AND genres != 'No disponible'").fetchall()
     if not all_games_context:
-        st.warning("No hay datos de juegos con géneros para el asistente de IA. Es posible que el scraper no haya extraído esta información.")
+        st.warning("No se encontraron juegos con géneros en la base de datos para alimentar a la IA.")
         return []
         
     game_list_for_prompt = [{"title": g['title'], "genres": g['genres']} for g in all_games_context]
@@ -59,20 +70,16 @@ def get_ai_recommendations(_conn, user_input):
     system_prompt = f"""
     Eres un asistente experto en Xbox Game Pass. Tu tarea es analizar la petición del usuario y recomendar juegos del catálogo disponible: {json.dumps(game_list_for_prompt)}.
     RESPONDE SOLAMENTE con un objeto JSON con una única clave "titles" que contenga una lista de strings con los NOMBRES EXACTOS de los juegos.
-    No añadas explicaciones. No inventes juegos. Si no encuentras nada, devuelve una lista vacía.
+    No añadas explicaciones ni texto adicional. No inventes juegos. Si no encuentras nada, devuelve una lista vacía.
     Ejemplo de respuesta si el usuario pide "juegos de cocina cooperativos": {json_example_str}
     """
     
     try:
-        # MEJORA 2: Usar un modelo más inteligente y eficiente.
         response = openai.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_input}
-            ],
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_input}],
             response_format={"type": "json_object"},
-            temperature=0.1, # Muy bajo para respuestas predecibles y basadas en hechos
+            temperature=0.1,
         )
         recommended_data = json.loads(response.choices[0].message.content)
         return recommended_data.get("titles", [])
@@ -88,24 +95,33 @@ def get_games_by_titles(conn, titles):
     return conn.cursor().execute(query, tuple(titles)).fetchall()
 
 def display_game_card(game):
-    """Muestra la tarjeta de información de un solo juego."""
+    """Muestra la tarjeta de información de un solo juego de forma segura."""
     with st.container(border=True):
         col1, col2 = st.columns([1, 3])
         with col1:
+            # game['image_url'] funciona porque game es un sqlite3.Row
             if game['image_url'] and game['image_url'] != "No disponible":
                 st.image(game['image_url'])
         with col2:
             st.subheader(game['title'])
-            st.link_button("✔️ Ver en la Tienda de Xbox (Incluido en Game Pass)", game['url'], use_container_width=True, type="primary")
-            st.caption(f"**Géneros:** {game.get('genres', 'No disponible')}")
-            st.write(game['description'][:250] + "..." if game['description'] and game['description'] != 'No disponible' else "No hay descripción disponible.")
+            st.link_button("✔️ Ver en la Tienda de Xbox", game['url'], use_container_width=True, type="primary")
+            
+            # --- CORRECCIÓN DEL AttributeError ---
+            # Accedemos a 'genres' directamente. Si no existe, usamos "No disponible"
+            try:
+                genres = game['genres'] if game['genres'] else "No disponible"
+            except IndexError:
+                genres = "No disponible"
+            st.caption(f"**Géneros:** {genres}")
+            # --- FIN DE LA CORRECCIÓN ---
+
+            description = game['description'] if game['description'] and game['description'] != 'No disponible' else "No hay descripción disponible."
+            st.write(description[:250] + "..." if len(description) > 250 else description)
+            
             with st.expander("Más detalles"):
                 st.write(f"**Desarrollador:** {game['developer']}")
                 st.write(f"**Editor:** {game['publisher']}")
                 st.write(f"**Fecha de Lanzamiento:** {game['release_date']}")
-                st.write(f"**Plataformas:** {game['platforms']}")
-                st.write(f"**Funcionalidades:** {game['features']}")
-                st.write(f"**Clasificación:** {game['rating_age']} - _{game['rating_descriptors']}_")
 
 # --- Interfaz Principal ---
 st.title("🎮 Buscador Inteligente del Catálogo de Game Pass")
@@ -129,19 +145,20 @@ if conn:
         if "Palabras Clave" in search_mode:
             with st.spinner("Buscando por palabras clave..."):
                 results = keyword_search(conn, user_input)
-        else:
+        else: # Asistente con IA
             recommended_titles = get_ai_recommendations(conn, user_input)
             if recommended_titles:
                 results = get_games_by_titles(conn, recommended_titles)
-            elif "openai" in st.secrets:
-                st.warning("El Asistente IA no encontró una recomendación.")
         
         if results:
             st.write(f"#### Se encontraron {len(results)} resultados:")
             for game in results:
                 display_game_card(game)
-        elif user_input:
-            st.warning(f"No se encontraron resultados para '{user_input}'. Intenta con otros términos o cambia el modo de búsqueda.")
+        else:
+            if "openai" in st.secrets and "Asistente con IA" in search_mode:
+                 st.info("El Asistente IA no encontró una recomendación para esa búsqueda. ¡Prueba otra idea!")
+            else:
+                st.warning(f"No se encontraron resultados para '{user_input}'. Intenta con otros términos.")
 else:
     st.info("Iniciando la aplicación y conectando a la base de datos...")
 
