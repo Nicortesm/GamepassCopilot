@@ -55,20 +55,16 @@ def get_ai_recommendations(_conn, user_input):
     all_titles = [row['title'] for row in _conn.execute("SELECT title FROM games ORDER BY title").fetchall()]
     if not all_titles: return []
 
-    # --- CORRECCIÓN AQUÍ ---
-    # Definimos el ejemplo JSON por separado para evitar conflictos de comillas
-    json_example = {
-        "titles": ["Halo Infinite", "Forza Horizon 5"]
-    }
-    # Usamos json.dumps para convertir el ejemplo a un string formateado
-    json_example_str = json.dumps(json_example)
+    # --- CORRECCIÓN ---
+    # Se eliminó la barra invertida \ antes de las comillas triples
+    json_example_str = json.dumps({"titles": ["Halo Infinite", "Forza Horizon 5"]})
 
-    system_prompt = f\"\"\"
+    system_prompt = f"""
     Eres un asistente experto en Xbox Game Pass. Tu única tarea es analizar la petición del usuario y devolver una lista de títulos de juegos disponibles en este catálogo: {json.dumps(all_titles)}.
     RESPONDE SOLAMENTE con un objeto JSON válido con una única clave "titles" que contenga una lista de strings con los nombres exactos de los juegos.
     No añadas explicaciones, saludos ni texto adicional. No inventes juegos. Si no encuentras nada, devuelve una lista vacía.
     Ejemplo de respuesta: {json_example_str}
-    \"\"\"
+    """
     # --- FIN DE LA CORRECCIÓN ---
     
     try:
@@ -108,12 +104,16 @@ def display_game_card(game):
                 st.write(f"**Funcionalidades:** {game['features']}")
                 st.write(f"**Clasificación:** {game['rating_age']} - _{game['rating_descriptors']}_")
 
+# --- Interfaz Principal ---
 st.title("🎮 Buscador Inteligente del Catálogo de Game Pass")
 conn = get_db_connection()
 if conn:
     try:
-        total_games = conn.execute("SELECT COUNT(id) FROM games").fetchone()[0]
+        total_games_row = conn.execute("SELECT COUNT(id) FROM games").fetchone()
+        total_games = total_games_row[0] if total_games_row else 0
+        
         st.success(f"Catálogo con **{total_games}** juegos. ¡Listo para buscar!")
+        
         search_mode = st.radio(
             "Elige tu modo de búsqueda:",
             ("Búsqueda por Palabras Clave (Rápida y Gratuita)", "Asistente con IA (Para recomendaciones complejas)"),
@@ -121,6 +121,7 @@ if conn:
             help="Usa 'Palabras Clave' para buscar por nombre, género, etc. (ej: 'terror cooperativo'). Usa 'IA' para preguntas como 'recomiéndame algo relajante'."
         )
         user_input = st.text_input("¿Qué quieres jugar?", placeholder="Ej: Halo, carreras mundo abierto, un juego como Stardew Valley...")
+        
         if user_input:
             results = []
             if "Palabras Clave" in search_mode:
@@ -132,13 +133,19 @@ if conn:
                     results = get_games_by_titles(conn, recommended_titles)
                 elif "openai" in st.secrets:
                     st.warning("El Asistente IA no encontró una recomendación.")
+            
             if results:
                 st.write(f"#### Se encontraron {len(results)} resultados para '{user_input}':")
                 for game in results:
                     display_game_card(game)
             elif user_input:
                 st.warning(f"No se encontraron resultados. Intenta con otros términos o cambia el modo de búsqueda.")
-        st.sidebar.info("Esta herramienta usa un scraper para obtener datos y la API de OpenAI para la búsqueda avanzada.")
-        st.sidebar.markdown("Creado con ❤️ por [@TuUsuario](https://instagram.com/TuUsuario)")
+
     except Exception as e:
         st.error(f"Ha ocurrido un error inesperado en la aplicación: {e}")
+
+# --- Pie de página ---
+st.sidebar.markdown("---")
+st.sidebar.header("Sobre este Proyecto")
+st.sidebar.info("Esta herramienta usa un scraper para obtener datos y la API de OpenAI para la búsqueda avanzada.")
+st.sidebar.markdown("Creado con ❤️ por [@TuUsuario](https://instagram.com/TuUsuario)")
