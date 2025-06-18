@@ -18,10 +18,10 @@ st.markdown("""
     /* Colores principales */
     :root {
         --xbox-green: #107C10;
-        --dark-grey: #1a1a1a; /* Un negro más suave */
+        --dark-grey: #1a1a1a;
         --medium-grey: #2e2e2e;
         --light-grey: #3c3c3c;
-        --text-color: #f0f0f0; /* Un blanco menos brillante */
+        --text-color: #f0f0f0;
     }
 
     /* Fondo de la app */
@@ -32,8 +32,8 @@ st.markdown("""
     
     /* Título principal */
     h1 {
-        color: var(--text-color); /* Blanco para el título principal */
-        font-size: 3rem !important; /* Más grande */
+        color: var(--text-color);
+        font-size: 2.8rem !important;
         font-weight: 700;
         text-align: center;
         padding-top: 1rem;
@@ -45,6 +45,8 @@ st.markdown("""
         text-align: center;
         font-size: 1.1rem;
         color: #a0a0a0;
+        max-width: 650px;
+        margin: auto;
     }
 
     /* Contenedores de tarjetas de juegos */
@@ -68,10 +70,10 @@ st.markdown("""
     
     /* Texto general */
     .st-emotion-cache-1629p8f, .st-emotion-cache-1y4p8pa, p {
-        font-size: 1.05rem; /* Letra un poco más grande */
+        font-size: 1.05rem;
     }
     
-    /* Botón "Nueva Búsqueda" */
+    /* Botones */
     .stButton > button {
         font-weight: 600;
         border-radius: 8px;
@@ -97,58 +99,82 @@ def get_db_connection():
         st.error(f"Error al conectar con la base de datos: {e}")
         return None
 
-def keyword_search(conn, search_term):
-    stop_words = set(['juego', 'juegos', 'de', 'un', 'una', 'con', 'para', 'que', 'sea', 'sean', 'y', 'o', 'el', 'la', 'los', 'las', 'algo', 'asi', 'llamado'])
-    keywords = [word for word in re.split(r'[\s,;]+', search_term.lower()) if word and word not in stop_words]
-    if not keywords: return []
-    query_parts = ["search_keywords LIKE ?"] * len(keywords)
-    query = "SELECT * FROM games WHERE " + " AND ".join(query_parts) + " ORDER BY title"
-    params = [f"%{kw}%" for kw in keywords]
-    try:
-        return conn.cursor().execute(query, tuple(params)).fetchall()
-    except sqlite3.Error:
-        return []
-
-@st.cache_data(show_spinner="🧠 Analizando tu petición...")
+@st.cache_data(show_spinner="🧠 El Asesor IA está pensando en tu recomendación...")
 def get_ai_recommendations(_conn, user_input):
+    """Usa un modelo de IA avanzado con un prompt flexible para entender la intención del usuario."""
     try:
         openai.api_key = st.secrets["openai"]["api_key"]
     except:
-        return {"error": "API Key no configurada."}
+        st.error("Clave de API de OpenAI no configurada en los Secrets de Streamlit.")
+        return []
 
-    all_games_context = _conn.execute("SELECT title, genres, description, features FROM games").fetchall()
-    game_list_for_prompt = [{"title": g['title'], "genres": g['genres'], "description_snippet": g['description'][:150] if g['description'] else ""} for g in all_games_context]
+    # Proporciona un contexto rico a la IA
+    all_games_context = _conn.execute(
+        "SELECT title, genres, description, features FROM games"
+    ).fetchall()
+    
+    game_list_for_prompt = [
+        {
+            "title": g['title'],
+            "genres": g['genres'] if g['genres'] and g['genres'] != 'No disponible' else 'Varios',
+            "description_snippet": (g['description'][:200] + "...") if g['description'] and g['description'] != 'No disponible' else "",
+            "features": g['features'] if g['features'] and g['features'] != 'No disponible' else ""
+        } 
+        for g in all_games_context
+    ]
+    
+    if not game_list_for_prompt:
+        st.warning("La base de datos no contiene suficiente información para la IA.")
+        return []
+
+    json_example_str = json.dumps({"titles": ["Overcooked! 2", "Golf With Your Friends"]})
     
     system_prompt = f"""
-    Eres un Asesor de Videojuegos experto en Xbox Game Pass. Tu misión es actuar como un recomendador inteligente y amigable.
-    Analiza la petición del usuario y, basándote en el catálogo completo que te proporciono, recomienda los juegos más adecuados.
-    Considera el título, los géneros y la descripción para entender la esencia de cada juego.
+    Eres "Game Pass Guru", un recomendador de videojuegos amigable y experto. Tu única fuente de conocimiento sobre los juegos disponibles es el siguiente catálogo en formato JSON.
 
-    Catálogo disponible: {json.dumps(game_list_for_prompt, indent=2)}
+    **Tu Misión:**
+    1.  **Entiende la intención del usuario:** Lee su petición y comprende qué tipo de experiencia está buscando (ej: "algo relajante", "un reto difícil", "una buena historia", "para jugar con amigos", "juegos que acaben amistades").
+    2.  **Analiza el catálogo:** Revisa la lista de juegos que te proporciono. Usa el título, los géneros, la descripción y las características para encontrar las mejores coincidencias.
+    3.  **Recomienda los mejores juegos:** Devuelve una lista de los títulos que mejor se ajustan a la intención del usuario.
 
-    Reglas de respuesta:
-    1. Tu ÚNICA salida debe ser un objeto JSON.
-    2. El objeto JSON debe contener una única clave: "titles".
-    3. El valor de "titles" debe ser una lista de strings con los NOMBRES EXACTOS de los juegos del catálogo.
-    4. No añadas explicaciones. No inventes juegos. Si no encuentras nada, devuelve una lista vacía: {{"titles": []}}.
+    **Catálogo de Juegos Disponibles:**
+    {json.dumps(game_list_for_prompt, indent=2)}
+
+    **Regla de Oro para tu Respuesta:**
+    Tu respuesta DEBE ser únicamente un objeto JSON válido con una sola clave, "titles", que contenga una lista de strings con los NOMBRES EXACTOS de los juegos que recomiendas. No escribas nada más.
+    Si no encuentras ninguna buena recomendación, devuelve una lista vacía: {{"titles": []}}
+
+    **Ejemplo de Petición:** "Quiero un juego que me haga reír y que pueda jugar con mi pareja en el sofá"
+    **Tu Respuesta Ejemplo (formato exacto):** {json_example_str}
     """
     
     try:
         response = openai.chat.completions.create(
-            model="gpt-4o-mini", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_input}],
-            response_format={"type": "json_object"}, temperature=0.2
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_input}
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.3,
         )
         return json.loads(response.choices[0].message.content).get("titles", [])
     except Exception as e:
-        return {"error": f"Error en la API: {e}"}
+        st.error(f"Ocurrió un error al comunicarse con el Asesor de IA: {e}")
+        return []
 
 def get_games_by_titles(conn, titles):
     if not titles: return []
-    params = tuple(titles) + tuple(titles)
+    # Usamos una lista de parámetros simple para la cláusula IN, ya que el orden ya lo da la IA
     placeholders = ','.join('?' for _ in titles)
-    order_by_clause = "ORDER BY CASE title " + " ".join(f"WHEN ? THEN {i} " for i, _ in enumerate(titles)) + "END"
-    query = f"SELECT * FROM games WHERE title IN ({placeholders}) {order_by_clause}"
-    return conn.cursor().execute(query, params).fetchall()
+    query = f"SELECT * FROM games WHERE title IN ({placeholders})"
+    
+    # Mapeamos los resultados a un diccionario para poder ordenarlos fácilmente
+    results_map = {game['title']: game for game in conn.cursor().execute(query, tuple(titles)).fetchall()}
+    
+    # Devolvemos los juegos en el mismo orden que los recomendó la IA
+    ordered_results = [results_map[title] for title in titles if title in results_map]
+    return ordered_results
 
 def display_game_card(game):
     with st.container(border=True):
@@ -158,11 +184,15 @@ def display_game_card(game):
                 st.image(game['image_url'])
         with col2:
             st.subheader(game['title'])
+            st.link_button("✔️ Ver en la Tienda de Xbox", game['url'], use_container_width=True)
             genres = game['genres'] if 'genres' in game.keys() and game['genres'] else "No especificado"
             st.caption(f"**Géneros:** {genres}")
             description = game['description'] if 'description' in game.keys() and game['description'] else "No hay descripción."
             st.write(description[:280] + "..." if len(description) > 280 else description)
-            st.link_button("Ver en la Tienda de Xbox", game['url'], use_container_width=True)
+            with st.expander("Más detalles"):
+                st.write(f"**Desarrollador:** {game['developer']}")
+                st.write(f"**Editor:** {game['publisher']}")
+                st.write(f"**Fecha de Lanzamiento:** {game['release_date']}")
 
 # --- INTERFAZ PRINCIPAL ---
 
@@ -177,32 +207,31 @@ if conn:
     
     st.markdown("---")
     
-    user_input = st.text_input("¿Qué te apetece jugar hoy?", placeholder="Ej: un juego de terror para jugar con amigos, algo como Stardew Valley, un shooter rápido...")
+    # Usamos el estado de sesión para manejar el ciclo de búsqueda
+    if "user_input" not in st.session_state:
+        st.session_state.user_input = ""
     
-    if user_input:
-        with st.spinner("Buscando las mejores recomendaciones para ti..."):
-            # En esta versión, siempre usamos la IA para la mejor experiencia
-            recommended_titles = get_ai_recommendations(conn, user_input)
-            if isinstance(recommended_titles, dict) and "error" in recommended_titles:
-                st.error(f"Error del Asistente: {recommended_titles['content']}")
-                results = []
-            elif recommended_titles:
-                results = get_games_by_titles(conn, recommended_titles)
-            else:
-                results = []
+    def submit_search():
+        st.session_state.user_input_submitted = st.session_state.widget_input
+    
+    user_input = st.text_input(
+        "¿Qué te apetece jugar hoy?",
+        key="widget_input",
+        on_change=submit_search,
+        placeholder="Ej: un juego de terror para jugar con amigos, algo como Stardew Valley, un shooter rápido..."
+    )
+    
+    if "user_input_submitted" in st.session_state and st.session_state.user_input_submitted:
+        recommended_titles = get_ai_recommendations(conn, st.session_state.user_input_submitted)
         
-        if results:
+        if recommended_titles:
+            results = get_games_by_titles(conn, recommended_titles)
             st.markdown("---")
-            st.header(f"Aquí tienes mis recomendaciones para '{user_input}':")
+            st.header(f"Aquí tienes mis recomendaciones para '{st.session_state.user_input_submitted}':")
             for game in results:
                 display_game_card(game)
         else:
-            st.warning(f"Lo siento, no encontré una recomendación clara para '{user_input}'. ¡Intenta describirlo de otra manera!")
-
-    st.markdown("---")
-    if st.button("✨ Empezar una Nueva Búsqueda"):
-        # Esto no es necesario con el enfoque actual, pero lo dejamos por si se quiere añadir funcionalidad
-        st.info("Simplemente escribe una nueva búsqueda arriba para empezar de nuevo.")
+            st.warning(f"Lo siento, no encontré una recomendación clara para '{st.session_state.user_input_submitted}'. ¡Intenta describirlo de otra manera!")
 
 else:
     st.info("Iniciando y conectando a la base de datos...")
