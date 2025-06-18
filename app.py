@@ -5,19 +5,15 @@ import json
 import re
 import openai
 
-# --- Configuración de la página ---
+# --- Configuración ---
 st.set_page_config(layout="wide", page_title="Asesor de Game Pass con IA")
-
-# --- Configuración de la App ---
 NOMBRE_BD = "gamepass_catalog.db"
 
-# --- Funciones de la App ---
+# --- Conexión a la Base de Datos ---
 @st.cache_resource
 def get_db_connection():
-    """Crea una conexión a la base de datos local que está en el repositorio."""
     if not os.path.exists(NOMBRE_BD):
-        st.error(f"Error crítico: El archivo '{NOMBRE_BD}' no se encontró.")
-        st.info("Asegúrate de haber subido 'gamepass_catalog.db' a tu repositorio de GitHub.")
+        st.error(f"Error: '{NOMBRE_BD}' no encontrado. Asegúrate de que está en el repositorio.")
         return None
     try:
         conn = sqlite3.connect(NOMBRE_BD, check_same_thread=False)
@@ -27,114 +23,123 @@ def get_db_connection():
         st.error(f"Error al conectar con la base de datos: {e}")
         return None
 
-def keyword_search(conn, search_term):
-    """Búsqueda rápida y gratuita por palabras clave."""
-    stop_words = set(['juego', 'juegos', 'de', 'un', 'una', 'con', 'para', 'que', 'sea', 'sean', 'y', 'o', 'el', 'la', 'los', 'las', 'algo', 'asi', 'llamado'])
-    keywords = [word for word in re.split(r'[\\s,;]+', search_term.lower()) if word and word not in stop_words]
+# --- Funciones de Lógica y Búsqueda ---
+
+def keyword_search(conn, keywords):
+    """Realiza una búsqueda SQL con una lista de palabras clave."""
     if not keywords: return []
-    
-    # Busca en las columnas que sabemos que existen y tienen datos
-    query_parts = ["(title LIKE ? OR description LIKE ? OR genres LIKE ? OR features LIKE ?)"] * len(keywords)
-    full_query = "SELECT * FROM games WHERE " + " AND ".join(query_parts) + " ORDER BY title"
-    params = []
-    for kw in keywords:
-        param = f"%{kw}%"
-        params.extend([param, param, param, param])
-    
+    query_parts = ["search_keywords LIKE ?"] * len(keywords)
+    query = "SELECT * FROM games WHERE " + " AND ".join(query_parts) + " ORDER BY title"
+    params = [f"%{kw}%" for kw in keywords]
     try:
-        return conn.cursor().execute(full_query, tuple(params)).fetchall()
-    except sqlite3.Error as e:
-        st.error(f"Error en la búsqueda por palabras clave: {e}")
+        return conn.cursor().execute(query, tuple(params)).fetchall()
+    except sqlite3.Error:
         return []
 
-@st.cache_data(show_spinner="🧠 Consultando al Asesor IA...")
-def get_ai_recommendations(_conn, user_input):
-    """Usa un modelo de IA avanzado con el contexto disponible."""
+@st.cache_data(show_spinner="🧠 Analizando tu petición...")
+def classify_and_extract_keywords(user_input):
+    """ETAPA 1: Usa IA para clasificar la consulta y extraer palabras clave."""
     try:
         openai.api_key = st.secrets["openai"]["api_key"]
-    except Exception:
-        st.error("Clave de API de OpenAI no configurada en los Secrets de Streamlit.")
-        return []
+    except:
+        return {"type": "error", "content": "API Key no configurada."}
 
-    # --- CORRECCIÓN CLAVE: Usar las columnas que SÍ tienen datos ---
-    # Pedimos todo el contexto relevante. Si una columna es NULL, no pasa nada.
-    all_games_context = _conn.execute(
-        "SELECT title, genres, description, features FROM games"
-    ).fetchall()
-    
-    game_list_for_prompt = [
-        {
-            "title": g['title'],
-            "genres": g['genres'] if g['genres'] and g['genres'] != 'No disponible' else 'Desconocido',
-            "description_snippet": (g['description'][:150] + "...") if g['description'] and g['description'] != 'No disponible' else "",
-            "features": g['features'] if g['features'] and g['features'] != 'No disponible' else ""
-        } 
-        for g in all_games_context
-    ]
-    
-    if not game_list_for_prompt:
-        st.warning("La base de datos está vacía. No se puede alimentar a la IA.")
-        return []
-
-    json_example_str = json.dumps({"titles": ["Overcooked! 2", "Cooking Simulator"]})
-    
     system_prompt = f"""
-    Eres un Asesor de Videojuegos experto en el catálogo de Xbox Game Pass. Tu misión es actuar como un recomendador inteligente y amigable.
-    Analiza la petición del usuario y, basándote en el catálogo completo que te proporciono, recomienda los juegos más adecuados.
-    Considera el título, los géneros, la descripción y las características para entender la esencia de cada juego.
-
-    Catálogo disponible:
-    {json.dumps(game_list_for_prompt, indent=2)}
-
-    Reglas de respuesta:
-    1. Tu ÚNICA salida debe ser un objeto JSON.
-    2. El objeto JSON debe contener una única clave: "titles".
-    3. El valor de "titles" debe ser una lista de strings con los NOMBRES EXACTOS de los juegos del catálogo.
-    4. No añadas explicaciones ni texto adicional. No inventes juegos. Si no encuentras nada, devuelve una lista vacía: {{"titles": []}}.
-
-    Ejemplo de petición de usuario: "Juegos de cocina"
-    Tu respuesta EJEMPLO debería ser: {json_example_str}
+    Tu tarea es analizar la petición de un usuario y clasificarla. Responde en JSON.
+    1. Clasifica la petición en una de estas categorías: 'specific_title', 'keyword_based', o 'semantic_recommendation'.
+    2. Extrae las palabras clave ("keywords") de la petición.
+    Ejemplos:
+    - Petición: "Halo" -> {{"type": "specific_title", "keywords": ["halo"]}}
+    - Petición: "juegos de terror cooperativos" -> {{"type": "keyword_based", "keywords": ["terror", "cooperativo"]}}
+    - Petición: "un juego para relajarme después del trabajo" -> {{"type": "semantic_recommendation", "keywords": ["relajante", "tranquilo"]}}
     """
-    
     try:
         response = openai.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_input}],
-            response_format={"type": "json_object"},
-            temperature=0.1,
+            response_format={"type": "json_object"}, temperature=0.0
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception as e:
+        return {"type": "error", "content": f"Error en la API: {e}"}
+
+@st.cache_data(show_spinner="🧠 Pidiendo una recomendación personalizada al Asesor IA...")
+def get_semantic_recommendation(_conn, user_input, filtered_list=None):
+    """ETAPA 2: Se usa solo para recomendaciones semánticas o como respaldo."""
+    if filtered_list:
+        game_list_for_prompt = [{"title": g['title'], "genres": g['genres'], "description": g['description'][:150]} for g in filtered_list]
+        prompt_context = f"Un asistente ya ha pre-filtrado esta lista para ti. Elige de esta lista CORTA:"
+    else:
+        all_games = _conn.execute("SELECT title, genres, description FROM games").fetchall()
+        game_list_for_prompt = [{"title": g['title'], "genres": g['genres'], "description": g['description'][:150]} for g in all_games]
+        prompt_context = "Usa el catálogo completo que te proporciono:"
+
+    system_prompt = f"""
+    Eres un Asesor de Videojuegos experto en Xbox Game Pass. Tu misión es recomendar juegos.
+    {prompt_context}
+    Catálogo: {json.dumps(game_list_for_prompt, indent=2)}
+    Analiza la petición del usuario y responde con un JSON que contenga la clave "titles" y una lista de los nombres exactos de los juegos recomendados.
+    Petición Original del Usuario: "{user_input}"
+    """
+    try:
+        response = openai.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "system", "content": system_prompt}],
+            response_format={"type": "json_object"}, temperature=0.2
         )
         return json.loads(response.choices[0].message.content).get("titles", [])
     except Exception as e:
-        st.error(f"Ocurrió un error al comunicarse con el Asesor de IA: {e}")
+        st.error(f"Error al refinar la búsqueda con IA: {e}")
         return []
 
 def get_games_by_titles(conn, titles):
     if not titles: return []
     params = tuple(titles) * 2
     placeholders = ','.join('?' for _ in titles)
-    order_by_clause = "ORDER BY CASE title "
-    for i, title in enumerate(titles):
-        order_by_clause += f"WHEN ? THEN {i} "
-    order_by_clause += "END"
+    order_by_clause = "ORDER BY CASE title " + " ".join(f"WHEN ? THEN {i} " for i, _ in enumerate(titles)) + "END"
     query = f"SELECT * FROM games WHERE title IN ({placeholders}) {order_by_clause}"
     return conn.cursor().execute(query, params).fetchall()
+
+def handle_search_request(conn, user_input):
+    """Orquesta el flujo de búsqueda híbrido y avanzado."""
+    analysis = classify_and_extract_keywords(user_input)
+    
+    if analysis.get("type") == "error":
+        st.error(analysis.get("content"))
+        return []
+
+    search_type = analysis.get("type")
+    keywords = analysis.get("keywords", [])
+    
+    st.info(f"Análisis IA: Tipo de búsqueda detectada: **{search_type}**. Palabras clave: **{', '.join(keywords)}**")
+
+    if search_type in ["specific_title", "keyword_based"]:
+        results = keyword_search(conn, keywords)
+        if results:
+            st.success("¡Búsqueda local exitosa! Mostrando resultados directos.")
+            return results
+        else:
+            st.warning("La búsqueda local no encontró nada. Pasando al Asesor IA para una búsqueda más amplia...")
+    
+    # Si la búsqueda local falla o es semántica, usar el Asesor IA
+    recommended_titles = get_semantic_recommendation(conn, user_input)
+    if recommended_titles:
+        return get_games_by_titles(conn, recommended_titles)
+    
+    return []
 
 def display_game_card(game):
     with st.container(border=True):
         col1, col2 = st.columns([1, 3])
         with col1:
-            if game['image_url'] and game['image_url'] != "No disponible":
-                st.image(game['image_url'])
+            if game['image_url'] and game['image_url'] != "No disponible": st.image(game['image_url'])
         with col2:
             st.subheader(game['title'])
             st.link_button("✔️ Ver en la Tienda de Xbox", game['url'], use_container_width=True, type="primary")
-            
-            genres = game['genres'] if 'genres' in game.keys() and game['genres'] and game['genres'] != 'No disponible' else "No especificado"
+            genres = game['genres'] if 'genres' in game.keys() and game['genres'] else "No especificado"
             st.caption(f"**Géneros:** {genres}")
-            
-            description = game['description'] if game['description'] and game['description'] != 'No disponible' else "No hay descripción."
+            description = game['description'] if 'description' in game.keys() and game['description'] else "No hay descripción."
             st.write(description[:250] + "..." if len(description) > 250 else description)
-            
             with st.expander("Más detalles"):
                 st.write(f"**Desarrollador:** {game['developer']}")
                 st.write(f"**Editor:** {game['publisher']}")
@@ -146,39 +151,23 @@ conn = get_db_connection()
 
 if conn:
     total_games = conn.execute("SELECT COUNT(id) FROM games").fetchone()[0]
-    st.success(f"Catálogo con **{total_games}** juegos. ¡Listo para buscar!")
+    st.success(f"Catálogo con **{total_games}** juegos. ¡Pregúntame lo que quieras!")
     
-    search_mode = st.radio(
-        "Elige tu modo de búsqueda:",
-        ("Búsqueda por Palabras Clave", "Asistente con IA (Recomendado)"),
-        horizontal=True, index=1,
-        help="Palabras Clave: Rápido, busca nombres exactos. Asistente IA: Entiende lo que pides (ej: 'juegos como Overcooked')."
-    )
-    
-    user_input = st.text_input("¿Qué te apetece jugar?", placeholder="Ej: un juego de terror para jugar con amigos...")
+    user_input = st.text_input("¿Qué te apetece jugar?", placeholder="Ej: Halo, juegos de terror cooperativo, algo para relajarme...")
     
     if user_input:
-        results = []
-        if "Palabras Clave" in search_mode:
-            with st.spinner("Buscando por palabras clave..."):
-                results = keyword_search(conn, user_input)
-        else: # Asistente con IA
-            recommended_titles = get_ai_recommendations(conn, user_input)
-            if recommended_titles:
-                results = get_games_by_titles(conn, recommended_titles)
+        results = handle_search_request(conn, user_input)
         
         if results:
-            st.write(f"#### Se encontraron {len(results)} resultados:")
+            st.write(f"---")
             for game in results:
                 display_game_card(game)
         else:
-            if user_input:
-                st.warning(f"No se encontraron resultados para '{user_input}'. Intenta con otros términos.")
+            st.warning(f"Lo sentimos, no se encontraron resultados para '{user_input}'. ¡Intenta con otra idea!")
 else:
-    st.info("Iniciando la aplicación y conectando a la base de datos...")
+    st.info("Iniciando y conectando a la base de datos...")
 
-# --- Pie de página ---
 st.sidebar.markdown("---")
 st.sidebar.header("Sobre este Proyecto")
-st.sidebar.info("Esta herramienta usa un scraper para obtener datos y la API de OpenAI para la búsqueda avanzada.")
+st.sidebar.info("Esta herramienta usa un modelo híbrido: primero clasifica tu búsqueda con IA y luego decide si usar una búsqueda local rápida o pedir una recomendación más profunda para optimizar costos y velocidad.")
 st.sidebar.markdown("Creado con ❤️ por [@TuUsuario](https://instagram.com/TuUsuario)")
